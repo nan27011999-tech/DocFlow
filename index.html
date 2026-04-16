@@ -1920,7 +1920,7 @@ function rAdminDash(el){
     <div class="sc"><div class="sv" style="color:var(--blue)">${Object.keys(ROLE_ACCESS_DESC).length}</div><div class="sl">ประเภทสิทธิ์</div></div>
   </div>
   <div style="margin-bottom:14px;display:flex;gap:7px">
-    <button class="bp bs" onclick="showDBStatus()" style="font-size:10px">🗄️ สถานะ Google Sheets DB</button>
+    <button class="bp bs" onclick="showFirebaseStatus()" style="font-size:10px" id="fb-status-btn">🔥 Firebase: กำลังตรวจสอบ...</button>
     <button class="bo bs" onclick="go('admin-users')" style="font-size:10px">👤 จัดการสิทธิ์</button>
   </div>
   <div class="sh" style="margin-top:0">📋 ผู้ใช้งานที่รอการอนุมัติ</div>
@@ -1956,6 +1956,20 @@ function rAdminUsers(el){
   el.innerHTML=`
   <div class="sec-badge" style="background:var(--blue-light);color:var(--blue);margin-bottom:12px">👤 จัดการสิทธิ์ผู้ใช้งาน</div>
   <div class="nb-box nb-bl" style="margin-bottom:12px">🔐 Admin สามารถกำหนดสิทธิ์ตามที่ผู้ใช้เลือก หรือเปลี่ยนแปลงสิทธิ์ได้เองก่อนอนุมัติ</div>
+  <div style="background:var(--bg2);border-radius:9px;padding:11px 13px;margin-bottom:12px">
+    <div style="font-size:11px;font-weight:500;color:var(--text2);margin-bottom:8px">📥 Export ข้อมูลผู้ใช้ (.csv)</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
+      <button class="bp bs" onclick="exportUsersCSV('all','th')" style="font-size:10px">🇹🇭 ทั้งหมด (ภาษาไทย)</button>
+      <button class="bp bs" onclick="exportUsersCSV('all','en')" style="font-size:10px">🇺🇸 All (English)</button>
+      <button class="bp bs" onclick="exportUsersCSV('all','both')" style="font-size:10px">🌐 ทั้งหมด (2 ภาษา)</button>
+    </div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap">
+      <button class="bs b-ap" onclick="exportUsersCSV('pending','th')" style="font-size:10px">🇹🇭 รออนุมัติ (ไทย)</button>
+      <button class="bs b-ap" onclick="exportUsersCSV('pending','en')" style="font-size:10px">🇺🇸 Pending (EN)</button>
+      <button class="bs b-vi" onclick="exportUsersCSV('approved','th')" style="font-size:10px">🇹🇭 ใช้งานอยู่ (ไทย)</button>
+      <button class="bs b-vi" onclick="exportUsersCSV('approved','en')" style="font-size:10px">🇺🇸 Active (EN)</button>
+    </div>
+  </div>
   <div class="sg sg4" style="margin-bottom:14px">
     <div class="sc"><div class="sv" style="color:#BA7517">${pending.length}</div><div class="sl">รอการอนุมัติ</div></div>
     <div class="sc"><div class="sv" style="color:#3B6D11">${approved.length}</div><div class="sl">ใช้งาน</div></div>
@@ -2013,7 +2027,7 @@ function rAdminUsers(el){
   </div>`;
 }
 
-function adminApproveUser(id){
+async function adminApproveUser(id){
   const u=DB.users.find(x=>x.id===id);
   if(!u) return;
   // Check if admin manually selected a role override
@@ -2021,7 +2035,7 @@ function adminApproveUser(id){
   if(sel && sel.value) { u.overrideRole = sel.value; u.posLabel = t(sel.value+'Role')||sel.value; }
   u.status='approved'; u.isApproved=true;
   u.assignedViews = ROLE_VIEWS[u.overrideRole||u.position]||ROLE_VIEWS.emp;
-  syncToGoogleSheets('users', DB.users);
+  await updateDoc(doc(db,'users',id),{status:'approved',isApproved:true,overrideRole:u.overrideRole||''});
   go(curScreen);
   toast('✓ '+u.name+' — กำหนดสิทธิ์ '+(t((u.overrideRole||u.position)+'Role')||u.overrideRole||u.position),'ok');
 }
@@ -2423,6 +2437,10 @@ async function initFirebase() {
   auth = authMod.getAuth(app);
   db   = fsMod.getFirestore(app);
 
+  // อัปเดตปุ่ม status หลัง Firebase โหลดสำเร็จ
+  const statusBtn = document.getElementById('fb-status-btn');
+  if(statusBtn){ statusBtn.textContent = '🟢 Firebase Connected'; }
+
   // Start auth listener
   onAuthStateChanged(auth, async (user) => {
     if (user) {
@@ -2447,6 +2465,83 @@ async function initFirebase() {
       } catch(err) { toast('โหลดข้อมูลล้มเหลว: '+err.message,'warn'); }
     }
   });
+}
+
+// ── Export Users CSV (รองรับ TH / EN / Bilingual) ──
+function exportUsersCSV(filter, lang) {
+  const useLang = lang || LANG || 'th';
+  let users = DB.users;
+  let filename = 'docflow_users_all.csv';
+  if(filter==='pending')  { users=DB.users.filter(u=>u.status==='pending');  filename='docflow_users_pending.csv'; }
+  if(filter==='approved') { users=DB.users.filter(u=>u.status==='approved'); filename='docflow_users_approved.csv'; }
+  if(!users.length){ toast('ไม่มีข้อมูลที่จะ Export','warn'); return; }
+
+  const HDR = {
+    th:['ชื่อ-นามสกุล','อีเมล','เบอร์โทร','แผนก','ตำแหน่ง','สิทธิ์ที่ได้รับ','สถานะ','วันที่ลงทะเบียน'],
+    en:['Full Name','Email','Phone','Department','Position','Assigned Role','Status','Register Date'],
+  };
+  const POS = {
+    th:{emp:'พนักงานทั่วไป',mgr:'ผู้จัดการ',hr:'HR / Admin',acc:'ฝ่ายบัญชี',exec:'ผู้บริหาร',exec2:'ผู้บริหาร (CFO)',admin:'ผู้ดูแลระบบ'},
+    en:{emp:'Employee',mgr:'Manager',hr:'HR / Admin',acc:'Accounting',exec:'Executive (CEO)',exec2:'Executive (CFO)',admin:'Administrator'},
+  };
+  const STS = {
+    th:{pending:'รออนุมัติ',approved:'ใช้งาน',rejected:'ปฏิเสธ',disabled:'ระงับ'},
+    en:{pending:'Pending',approved:'Active',rejected:'Rejected',disabled:'Disabled'},
+  };
+  const q = v => '"'+String(v||'').replace(/"/g,'""')+'"';
+  const makeRow = (u,l) => [u.name,u.email,u.phone,u.dept,
+    u.posLabel||POS[l][u.position]||u.position,
+    POS[l][u.overrideRole||u.position]||u.position,
+    STS[l][u.status]||u.status, u.date||''
+  ].map(q).join(',');
+
+  let lines = [];
+  if(useLang==='both') {
+    filename = filename.replace('.csv','_bilingual.csv');
+    lines.push(HDR.th.map(q).join(','));
+    lines.push(HDR.en.map(q).join(','));
+    users.forEach(u=>{ lines.push(makeRow(u,'th')); lines.push(makeRow(u,'en')); lines.push(''); });
+  } else {
+    const l = useLang==='en'?'en':'th';
+    lines.push(HDR[l].map(q).join(','));
+    users.forEach(u=>lines.push(makeRow(u,l)));
+  }
+
+  const csv = '\uFEFF' + lines.join('\r\n');
+  const blob = new Blob([csv],{type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href=url; a.download=filename; a.click();
+  URL.revokeObjectURL(url);
+  toast('Export สำเร็จ '+users.length+' รายการ → '+filename,'ok');
+}
+// ── Firebase Status Checker ──
+async function showFirebaseStatus() {
+  const btn = document.getElementById('fb-status-btn');
+  if(btn){ btn.textContent = '🔥 กำลังตรวจสอบ...'; }
+  try {
+    if(!db){ toast('Firebase ยังโหลดไม่เสร็จ กรุณารอสักครู่','warn'); return; }
+    // ทดสอบอ่าน Firestore
+    const snap = await getDoc(doc(db,'settings','global'));
+    const docsCount = DB.docs.length;
+    const usersCount = DB.users.length;
+    const trRate = DB.trRate;
+    const msg = [
+      '🟢 Firebase เชื่อมต่อสำเร็จ',
+      '─────────────────',
+      '📄 เอกสารในระบบ: '+docsCount+' รายการ',
+      '👥 ผู้ใช้งาน: '+usersCount+' คน',
+      '💰 อัตราค่าเดินทาง: ฿'+trRate+'/กม.',
+      '🗄️ Project: docflow-17cd3',
+      '⏱️ เวลา: '+new Date().toLocaleTimeString('th-TH'),
+    ].join('
+');
+    alert(msg);
+    if(btn){ btn.textContent = '🟢 Firebase Connected'; btn.style.background='#27500A'; }
+  } catch(err) {
+    alert('🔴 Firebase Error: '+err.message);
+    if(btn){ btn.textContent = '🔴 Firebase Error'; btn.style.background='#791F1F'; }
+  }
 }
 
 showLogin();
